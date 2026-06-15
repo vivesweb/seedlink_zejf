@@ -152,7 +152,7 @@ void process_mseed(char *record) {
                 mseed_blocks_received++;
                 time_t now = time(NULL);
                 if (now - last_print_time >= 5) { // Print every 5 seconds if receiving data
-                    printf("[Seedlink Bridge] Recibiendo datos de %s_%s... (%d bloques procesados, %d muestras/bloque)\n", cfg.network, cfg.station, mseed_blocks_received, (int)msr->numsamples);
+                    printf("[Seedlink Bridge] Receiving data from %s_%s... (%d blocks processed, %d samples/block)\n", cfg.network, cfg.station, mseed_blocks_received, (int)msr->numsamples);
                     last_print_time = now;
                 }
             }
@@ -172,14 +172,14 @@ void* seedlink_client_thread(void *arg) {
         memcpy((char *)&serv_addr.sin_addr.s_addr, (char *)server->h_addr, server->h_length);
         serv_addr.sin_port = htons(cfg.sl_port);
         
-        printf("[Seedlink Bridge] Conectando a servidor remoto Seedlink %s:%d...\n", cfg.sl_host, cfg.sl_port);
+        printf("[Seedlink Bridge] Connecting to remote Seedlink server %s:%d...\n", cfg.sl_host, cfg.sl_port);
         if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-            printf("[Seedlink Bridge] Error conectando a Seedlink: %s\n", strerror(errno));
+            printf("[Seedlink Bridge] Error connecting to Seedlink: %s\n", strerror(errno));
             close(sock);
             sleep(5);
             continue;
         }
-        printf("[Seedlink Bridge] Conectado a %s:%d.\n", cfg.sl_host, cfg.sl_port);
+        printf("[Seedlink Bridge] Connected to %s:%d.\n", cfg.sl_host, cfg.sl_port);
         
         char cmd[256];
         char buf[1024];
@@ -187,39 +187,39 @@ void* seedlink_client_thread(void *arg) {
         snprintf(cmd, sizeof(cmd), "HELLO\r\n");
         send(sock, cmd, strlen(cmd), 0);
         int nr = recv(sock, buf, sizeof(buf)-1, 0);
-        if(nr > 0) { buf[nr]=0; printf("[Seedlink Bridge] Respuesta HELLO: %s\n", buf); }
+        if(nr > 0) { buf[nr]=0; printf("[Seedlink Bridge] Reply HELLO: %s\n", buf); }
         
         snprintf(cmd, sizeof(cmd), "STATION %s %s\r\n", cfg.station, cfg.network);
-        printf("[Seedlink Bridge] Enviando: %s", cmd);
+        printf("[Seedlink Bridge] Sending: %s", cmd);
         send(sock, cmd, strlen(cmd), 0);
         nr = recv(sock, buf, sizeof(buf)-1, 0);
-        if(nr > 0) { buf[nr]=0; printf("[Seedlink Bridge] Respuesta STATION: %s\n", buf); }
+        if(nr > 0) { buf[nr]=0; printf("[Seedlink Bridge] Reply STATION: %s\n", buf); }
 
         snprintf(cmd, sizeof(cmd), "SELECT %s\r\n", cfg.channel);
-        printf("[Seedlink Bridge] Enviando: %s", cmd);
+        printf("[Seedlink Bridge] Sending: %s", cmd);
         send(sock, cmd, strlen(cmd), 0);
         nr = recv(sock, buf, sizeof(buf)-1, 0);
-        if(nr > 0) { buf[nr]=0; printf("[Seedlink Bridge] Respuesta SELECT: %s\n", buf); }
+        if(nr > 0) { buf[nr]=0; printf("[Seedlink Bridge] Reply SELECT: %s\n", buf); }
 
         snprintf(cmd, sizeof(cmd), "DATA\r\n");
-        printf("[Seedlink Bridge] Enviando: %s", cmd);
+        printf("[Seedlink Bridge] Sending: %s", cmd);
         send(sock, cmd, strlen(cmd), 0);
         nr = recv(sock, buf, sizeof(buf)-1, 0);
-        if (nr > 0) { buf[nr]=0; printf("[Seedlink Bridge] Respuesta DATA: %s\n", buf); }
+        if (nr > 0) { buf[nr]=0; printf("[Seedlink Bridge] Reply DATA: %s\n", buf); }
         
         snprintf(cmd, sizeof(cmd), "END\r\n");
-        printf("[Seedlink Bridge] Enviando: %s", cmd);
+        printf("[Seedlink Bridge] Sending: %s", cmd);
         send(sock, cmd, strlen(cmd), 0);
         /* END starts streaming, no text response - binary packets follow immediately */
         
-        printf("[Seedlink Bridge] Entrando al bucle de lectura de bloques MiniSEED...\n");
+        printf("[Seedlink Bridge] Entering MiniSEED block reading loop...\n");
         fflush(stdout);
         int blocks_total = 0;
         while (1) {
             char hdr[SL_HDRSIZE];
             int n = recv(sock, hdr, SL_HDRSIZE, MSG_WAITALL);
             if (n == 0) {
-                printf("[Seedlink Bridge] Servidor cerró la conexión (recv=0).\n");
+                printf("[Seedlink Bridge] Server closed connection (recv=0).\n");
                 break;
             }
             if (n < 0) {
@@ -227,11 +227,11 @@ void* seedlink_client_thread(void *arg) {
                 break;
             }
             if (n < SL_HDRSIZE) {
-                printf("[Seedlink Bridge] Header incompleto: %d bytes\n", n);
+                printf("[Seedlink Bridge] Incomplete header: %d bytes\n", n);
                 break;
             }
             /* Print raw SeedLink header for diagnosis */
-            printf("[Seedlink Bridge] Header recibido (%d bytes): [%c%c%c%c%c%c%c%c] hex: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            printf("[Seedlink Bridge] Header received (%d bytes): [%c%c%c%c%c%c%c%c] hex: %02x %02x %02x %02x %02x %02x %02x %02x\n",
                    n,
                    (hdr[0]>=32&&hdr[0]<127)?hdr[0]:'.', (hdr[1]>=32&&hdr[1]<127)?hdr[1]:'.',
                    (hdr[2]>=32&&hdr[2]<127)?hdr[2]:'.', (hdr[3]>=32&&hdr[3]<127)?hdr[3]:'.',
@@ -243,13 +243,13 @@ void* seedlink_client_thread(void *arg) {
             
             /* Check SeedLink signature: must start with "SL" */
             if (hdr[0] != 'S' || hdr[1] != 'L') {
-                printf("[Seedlink Bridge] AVISO: header no empieza con 'SL', protocolo inesperado.\n");
+                printf("[Seedlink Bridge] WARNING: header does not start with 'SL', unexpected protocol.\n");
             }
             
             char rec[SL_RECSIZE];
             n = recv(sock, rec, SL_RECSIZE, MSG_WAITALL);
             if (n == 0) {
-                printf("[Seedlink Bridge] Servidor cerró la conexión al leer registro MiniSEED.\n");
+                printf("[Seedlink Bridge] Server closed connection while reading MiniSEED record.\n");
                 break;
             }
             if (n < 0) {
@@ -257,11 +257,11 @@ void* seedlink_client_thread(void *arg) {
                 break;
             }
             blocks_total++;
-            printf("[Seedlink Bridge] Bloque MiniSEED #%d recibido (%d bytes), procesando...\n", blocks_total, n);
+            printf("[Seedlink Bridge] MiniSEED block #%d received (%d bytes), processing...\n", blocks_total, n);
             fflush(stdout);
             process_mseed(rec);
         }
-        printf("[Seedlink Bridge] Bucle terminado. Total bloques recibidos: %d. Reconectando en 5s...\n", blocks_total);
+        printf("[Seedlink Bridge] Loop terminated. Total blocks received: %d. Reconnecting in 5s...\n", blocks_total);
         close(sock);
         sleep(5);
     }
@@ -304,7 +304,7 @@ void *client_handler(void *arg) {
         if (strcmp(req, "realtime\n") == 0) {
             // El servidor Zejf no responde "realtime\n" directamente aquí, sino que cada bloque
             // de muestras ya empieza con "realtime\n".
-            printf("Client %d envió realtime.\n", id);
+            printf("Client %d send realtime.\n", id);
         } else if (strcmp(req, "getdata\n") == 0) {
             if (fgets(req, sizeof(req), f) == NULL) break;
             if (fgets(req, sizeof(req), f) == NULL) break;
@@ -320,7 +320,7 @@ void *client_handler(void *arg) {
     
     fclose(f);
 end:
-    printf("Client %d desconectado.\n", id);
+    printf("Client %d disconnected.\n", id);
     pthread_mutex_lock(&clients_mutex);
     if (zejf_clients[id] == sock) {
         zejf_clients[id] = -1;
@@ -354,14 +354,14 @@ int main() {
     bind(server_fd, (struct sockaddr *)&address, sizeof(address));
     listen(server_fd, 3);
     
-    printf("Zejf Bridge escuchando en puerto %d...\n", cfg.zejf_port);
+    printf("Zejf Bridge listening on port %d...\n", cfg.zejf_port);
     
     while (1) {
         int client_sock = accept(server_fd, NULL, NULL);
         if (client_sock < 0) continue;
         
         char msg[256];
-        printf("Nuevo cliente ZejfSeis conectado. Enviando handshake...\n");
+        printf("New ZejfSeis client connected. Sending handshake...\n");
         int len = snprintf(msg, sizeof(msg), "compatibility_version:4\nsample_rate:%d\nerr_value:-2147483648\nlast_log_id:%llu\n", sample_rate, (unsigned long long)current_log_id);
         send(client_sock, msg, len, MSG_NOSIGNAL);
         
@@ -377,7 +377,7 @@ int main() {
         pthread_mutex_unlock(&clients_mutex);
         
         if (assigned_id != -1) {
-            printf("Nuevo cliente aceptado, id %d\n", assigned_id);
+            printf("New client accepted, id %d\n", assigned_id);
             client_t *cli = malloc(sizeof(client_t));
             cli->sock = client_sock;
             cli->id = assigned_id;
@@ -386,7 +386,7 @@ int main() {
             pthread_detach(cli_thread);
         } else {
             close(client_sock);
-            printf("Cliente rechazado, demasiadas conexiones.\n");
+            printf("Client rejected, too many connections.\n");
         }
     }
     return 0;

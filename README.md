@@ -2,7 +2,7 @@
 
 **SeedLink → ZejfSeis Real-Time Bridge**
 
-A lightweight C daemon that connects to a remote SeedLink server as a client, decodes incoming MiniSEED records, and re-broadcasts the raw seismic samples in the ZejfSeis protocol format. This allows the [ZejfSeis](https://github.com/xspanger3770/ZejfSeis) visualization software to display real-time seismic waveforms from any SeedLink-compatible source.
+A lightweight C daemon that connects to a remote SeedLink server as a client, decodes incoming MiniSEED records, and re-broadcasts the raw seismic samples in the ZejfSeis protocol format. This allows the [ZejfSeis](https://github.com/xspanger3770/ZejfSeis) visualization software to display real-time seismic waveforms from any SeedLink-compatible source. Tested in **Linux Ubuntu 24.04.4 LTS**.
 
 ---
 

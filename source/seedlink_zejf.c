@@ -455,7 +455,7 @@ int main() {
     bind(server_fd, (struct sockaddr *)&address, sizeof(address));
     listen(server_fd, 3);
     
-    printf("Zejf Bridge listening on port %d...\n", cfg.zejf_port);
+    printf("Zejf Bridge V.1.0.0 listening on port %d...\n", cfg.zejf_port);
     
     while (1) {
         int client_sock = accept(server_fd, NULL, NULL);

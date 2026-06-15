@@ -1,4 +1,4 @@
-# Seedlink_ZejfSeis
+# Seedlink_ZejfSeis V.1.0.0
 
 **SeedLink → ZejfSeis Real-Time Bridge**
 

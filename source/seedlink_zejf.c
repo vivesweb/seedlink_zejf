@@ -99,6 +99,69 @@ pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 uint64_t current_log_id = 0;
 int sample_rate = 100;
 
+#define LOG_ID_FILE "../data/last_log_id.txt"
+
+/* Carga el último log_id guardado en disco. Si no existe o es invalido,
+ * cae al valor basado en el reloj (comportamiento original). */
+static uint64_t load_last_log_id(void) {
+    FILE *f = fopen(LOG_ID_FILE, "r");
+    if (f) {
+        unsigned long long val = 0;
+        if (fscanf(f, "%llu", &val) == 1) {
+            fclose(f);
+            /* IMPORTANTE: current_log_id debe representar tiempo real
+             * (reloj), no "numero de muestras procesadas". Si simplemente
+             * devolviesemos el valor persistido, el handshake enviaria un
+             * last_log_id correspondiente al momento del ultimo guardado,
+             * no a "ahora" -- y ZejfSeis ancla su reloj con ese desfase,
+             * mostrando los datos retrasados indefinidamente.
+             *
+             * Por eso usamos el mayor de:
+             *  - el valor basado en el reloj actual (caso normal: no hay
+             *    desfase, igual que el comportamiento original)
+             *  - el valor persistido + 1 (solo para garantizar que nunca
+             *    retrocede, por si el reloj del sistema fuese menor)
+             */
+            struct timeval tv_now;
+            gettimeofday(&tv_now, NULL);
+            uint64_t clock_based = (uint64_t)(tv_now.tv_sec * 100 + (tv_now.tv_usec / 10000));
+            uint64_t persisted_plus = (uint64_t)val + 1;
+            return (clock_based > persisted_plus) ? clock_based : persisted_plus;
+        }
+        fclose(f);
+    }
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)(tv.tv_sec * 100 + (tv.tv_usec / 10000));
+}
+
+/* Guarda el log_id actual en disco para que sobreviva a un reinicio.
+ * Escritura atómica via fichero temporal + rename. */
+static void save_last_log_id(uint64_t id) {
+    char tmp[] = LOG_ID_FILE ".tmp";
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "%llu\n", (unsigned long long)id);
+    fclose(f);
+    rename(tmp, LOG_ID_FILE);
+}
+
+/* Hilo que persiste current_log_id periódicamente, para que si el proceso
+ * se reinicia, el handshake "last_log_id" continue donde lo dejó y
+ * ZejfSeis no detecte una discontinuidad que le impida reconectar. */
+void *log_id_persist_thread(void *arg) {
+    uint64_t last_saved = 0;
+    while (1) {
+        sleep(5);
+        uint64_t id = current_log_id;
+        if (id != last_saved) {
+            save_last_log_id(id);
+            last_saved = id;
+        }
+    }
+    return NULL;
+}
+
 int mseed_blocks_received = 0;
 time_t last_print_time = 0;
 
@@ -108,7 +171,44 @@ void process_mseed(char *record) {
     if (ret == MS_NOERROR) {
         if (msr->numsamples > 0 && msr->datasamples != NULL) {
             sample_rate = (int)msr->samprate;
-            
+
+            /* DIAGNOSTICO: comparar el tiempo de la muestra (segun el
+             * propio MiniSEED) con el reloj del sistema, para saber si
+             * el retraso viene del feed Seedlink (latencia real del dato)
+             * o de un desajuste local en current_log_id / handshake. */
+            {
+                nstime_t record_start = msr->starttime;
+                nstime_t record_end = record_start +
+                    (nstime_t)((msr->numsamples - 1) * (NSTMODULUS / msr->samprate));
+                time_t record_end_sec = (time_t)(record_end / NSTMODULUS);
+                time_t now_sec = time(NULL);
+                double delay_sec = (double)(now_sec - record_end_sec);
+                static time_t last_delay_print = 0;
+                if (now_sec - last_delay_print >= 5) {
+                    char timestr[64];
+                    ms_nstime2timestr_n(record_end, timestr, sizeof(timestr), ISOMONTHDAY, NANO_MICRO);
+                    printf("[Seedlink Bridge] DIAG: last sample time=%s (record end), now=%ld, delay=%.2fs\n",
+                           timestr, (long)now_sec, delay_sec);
+                    last_delay_print = now_sec;
+                }
+            }
+
+            /* Resincroniza current_log_id con el reloj real antes de
+             * asignar ids a las muestras de este bloque. Esto evita que
+             * el contador "se quede atras" respecto al tiempo real por
+             * pequeñas pausas/jitter en la llegada de bloques, lo cual
+             * causaria un desfase creciente en la grafica de ZejfSeis.
+             * Solo avanza hacia delante (nunca retrocede), preservando
+             * la monotonia que ZejfSeis necesita. */
+            {
+                struct timeval tv_now;
+                gettimeofday(&tv_now, NULL);
+                uint64_t clock_based = (uint64_t)(tv_now.tv_sec * 100 + (tv_now.tv_usec / 10000));
+                if (clock_based > current_log_id) {
+                    current_log_id = clock_based;
+                }
+            }
+
             size_t buf_size = 32 + msr->numsamples * 48;
             char *chunk = malloc(buf_size);
             if (chunk) {
@@ -334,10 +434,11 @@ int main() {
     for (int i=0; i<MAX_CLIENTS; i++) zejf_clients[i] = -1;
     load_config("../data/ranges.json");
     
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    current_log_id = tv.tv_sec * 100 + (tv.tv_usec / 10000);
-    
+    current_log_id = load_last_log_id();
+
+    pthread_t persist_thread;
+    pthread_create(&persist_thread, NULL, log_id_persist_thread, NULL);
+
     pthread_t sl_thread;
     pthread_create(&sl_thread, NULL, seedlink_client_thread, NULL);
     

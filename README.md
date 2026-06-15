@@ -114,21 +114,21 @@ Alternatively, wrap it in a systemd service or run it inside a `tmux`/`screen` s
 ### Expected startup output
 
 ```
-Zejf Bridge escuchando en puerto 6222...
-[Seedlink Bridge] Conectando a servidor remoto Seedlink seedlink.eqcitizen.org:18000...
-[Seedlink Bridge] Conectado a seedlink.eqcitizen.org:18000.
-[Seedlink Bridge] Respuesta HELLO: SeedLink v3.0 (EqCitizen/1.0) :: SLPROTO:3.0
-[Seedlink Bridge] Enviando: STATION EQ002 XX
-[Seedlink Bridge] Respuesta STATION: OK
-[Seedlink Bridge] Enviando: SELECT HHZ
-[Seedlink Bridge] Respuesta SELECT: OK
-[Seedlink Bridge] Enviando: DATA
-[Seedlink Bridge] Respuesta DATA: OK
-[Seedlink Bridge] Enviando: END
-[Seedlink Bridge] Entrando al bucle de lectura de bloques MiniSEED...
-[Seedlink Bridge] Header recibido (8 bytes): [SL000000] hex: 53 4c 30 30 30 30 30 30
-[Seedlink Bridge] Bloque MiniSEED #1 recibido (512 bytes), procesando...
-[Seedlink Bridge] Recibiendo datos de XX_EQ002... (1 bloques procesados, 100 muestras/bloque)
+Zejf Bridge v.1.0.0 listening on port 6222...
+[Seedlink Bridge] Connecting to remote Seedlink server seedlink.eqcitizen.org:18000...
+[Seedlink Bridge] Connected to seedlink.eqcitizen.org:18000.
+[Seedlink Bridge] Reply HELLO: SeedLink v3.0 (EqCitizen/1.0) :: SLPROTO:3.0
+[Seedlink Bridge] Sending: STATION EQ002 XX
+[Seedlink Bridge] Reply STATION: OK
+[Seedlink Bridge] Sending: SELECT HHZ
+[Seedlink Bridge] Reply SELECT: OK
+[Seedlink Bridge] Sending: DATA
+[Seedlink Bridge] Reply DATA: OK
+[Seedlink Bridge] Sending: END
+[Seedlink Bridge] Entering MiniSEED block reading loop...
+[Seedlink Bridge] Header received (8 bytes): [SL000000] hex: 53 4c 30 30 30 30 30 30
+[Seedlink Bridge] MiniSEED block #1 received (512 bytes), processing...
+[Seedlink Bridge] Receiving data from XX_EQ002... (1 blocks processed, 100 samples/block)
 ```
 
 ---
@@ -283,7 +283,98 @@ server {
 ```
 ---
 
-## License
+# Hardening: fail2ban for Repeated Connection Attempts
+
+Nginx's `limit_conn` (above) caps how many *simultaneous* connections an IP can hold, but it does nothing against an IP that repeatedly connects, disconnects, and reconnects (scanning, brute-force probing, or a misbehaving client hammering the port). **fail2ban** closes that gap by watching the Nginx stream logs and temporarily banning IPs that reconnect too often, via firewall rules.
+
+This is not a full tutorial — just the minimum practical setup for this service.
+
+## 1. Confirm the log format includes IP and timestamp
+
+The `seedlink` log format referenced in the Nginx config must include at least the client IP and the connection time. A typical `stream` log format:
+
+```nginx
+# In the stream { ... } block, alongside the upstream/server definitions
+log_format seedlink '$remote_addr [$time_local] '
+                     'status=$status bytes_sent=$bytes_sent '
+                     'bytes_received=$bytes_received '
+                     'session_time=$session_time';
+```
+
+Each new TCP connection/disconnection produces one log line in `/var/log/nginx/seedlink_zejfseis_access.log` with the source IP — this is what fail2ban will parse.
+
+## 2. Install fail2ban
+
+```bash
+sudo apt install fail2ban
+```
+
+## 3. Create a filter
+
+Create `/etc/fail2ban/filter.d/seedlink-zejfseis.conf`:
+
+```ini
+[Definition]
+failregex = ^<HOST> \[.*\] status=
+ignoreregex =
+```
+
+This matches **every** connection from an IP, regardless of status — the goal isn't to detect "errors" (a TCP bridge has no auth to fail), but to detect an abnormally **high rate of connections** from the same source.
+
+## 4. Create the jail
+
+Add to `/etc/fail2ban/jail.local` (create the file if it doesn't exist):
+
+```ini
+[seedlink-zejfseis]
+enabled  = true
+port     = 6222
+filter   = seedlink-zejfseis
+logpath  = /var/log/nginx/seedlink_zejfseis_access.log
+# Ban an IP if it opens more than 10 connections within 60 seconds
+maxretry = 10
+findtime = 60
+# Ban duration: 10 minutes (increase for repeat offenders, see step 6)
+bantime  = 600
+action   = %(action_mwl)s
+```
+
+- `maxretry` / `findtime`: tune based on legitimate client behavior. A ZejfSeis client normally opens **one** long-lived connection — 10 reconnects in 60 seconds is already abnormal and indicates a reconnect loop, scan, or abuse.
+- `bantime`: short bans (minutes) are usually enough to break automated reconnect storms without permanently locking out a legitimate user who briefly misconfigured their client.
+
+## 5. Restart fail2ban and verify
+
+```bash
+sudo systemctl restart fail2ban
+sudo fail2ban-client status seedlink-zejfseis
+```
+
+The `status` command shows currently banned IPs and the total ban count. Check `journalctl -u fail2ban` if the jail doesn't seem to be matching lines — the most common issue is the log format not matching `failregex` exactly.
+
+## 6. Escalating bans for repeat offenders (optional)
+
+To increase `bantime` for IPs that get banned repeatedly (e.g. doubling each time), enable the bundled `recidive` jail in `/etc/fail2ban/jail.local`:
+
+```ini
+[recidive]
+enabled  = true
+logpath  = /var/log/fail2ban.log
+banaction = %(banaction_allports)s
+bantime  = 1w
+findtime = 1d
+maxretry = 3
+```
+
+This bans, for a week, any IP that triggers 3 separate jails (including `seedlink-zejfseis`) within a day.
+
+## 7. Notes specific to this setup
+
+- Since the C binary listens only on `127.0.0.1:6221` and Nginx is the public-facing port, fail2ban must act on the **firewall** (iptables/nftables), not on the Nginx config — `action = %(action_mwl)s` (the default `iptables-multiport` + email-with-whois action) handles this automatically.
+- If you run the bridge behind a CDN or another reverse proxy that itself terminates TCP (so `$remote_addr` in Nginx logs is always the proxy's IP, not the real client), fail2ban based on these logs becomes useless — banning the proxy would block everyone. In that case, rate-limiting must happen at that outer layer instead.
+- Whitelist your own monitoring/admin IPs in `jail.local` via `ignoreip = 127.0.0.1/8 <your-ip>` to avoid self-locking during testing.
+
+---
+
 
 Part of the [EqCitizen](https://eqcitizen.org) seismic monitoring project.  
 See the root repository for license details.
